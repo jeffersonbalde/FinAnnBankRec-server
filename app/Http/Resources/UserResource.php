@@ -25,6 +25,7 @@ class UserResource extends JsonResource
             'designation' => $this->designation,
             'avatar_url' => $this->avatar_url,
             'is_active' => $this->is_active,
+            'deletable' => ! $this->resource->hasActivityRecords(),
             'created_at' => $this->created_at,
         ];
     }

@@ -78,4 +78,21 @@ class User extends Authenticatable
     {
         return $this->role === UserRole::Admin;
     }
+
+    /**
+     * Whether this account has left any trace in the system (prepared/reviewed a
+     * reconciliation, uploaded an import, run matching, or has any audit entry).
+     * A user with activity can only be deactivated, never permanently deleted,
+     * so that history keeps its accountable name.
+     */
+    public function hasActivityRecords(): bool
+    {
+        return Reconciliation::query()
+            ->where('prepared_by', $this->id)
+            ->orWhere('reviewed_by', $this->id)
+            ->exists()
+            || ImportBatch::query()->where('uploaded_by', $this->id)->exists()
+            || MatchRun::query()->where('run_by', $this->id)->exists()
+            || AuditLog::query()->where('user_id', $this->id)->exists();
+    }
 }

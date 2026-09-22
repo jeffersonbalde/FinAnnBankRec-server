@@ -1,6 +1,7 @@
 <?php
 
 use App\Enums\UserRole;
+use App\Models\AuditLog;
 use App\Models\User;
 use Illuminate\Http\UploadedFile;
 use Illuminate\Support\Facades\Hash;
@@ -90,6 +91,38 @@ it('updates a user without touching the password when none is given', function (
 it('toggles a user active flag', function () {
     actingAsRole(UserRole::Admin);
     $user = User::factory()->create(['is_active' => true]);
+
+    $this->postJson("/api/v1/users/{$user->id}/toggle-active")
+        ->assertOk()
+        ->assertJsonPath('data.is_active', false);
+});
+
+it('deletes a user with no activity records', function () {
+    actingAsRole(UserRole::Admin);
+    $user = User::factory()->role(UserRole::BudgetOfficer)->create();
+
+    $this->deleteJson("/api/v1/users/{$user->id}")->assertNoContent();
+
+    expect(User::find($user->id))->toBeNull();
+});
+
+it('blocks deleting a user who has activity records, and deactivating stays available', function () {
+    actingAsRole(UserRole::Admin);
+    $user = User::factory()->role(UserRole::BudgetOfficer)->create();
+
+    AuditLog::create([
+        'user_id' => $user->id,
+        'user_name' => $user->name,
+        'action' => 'created',
+        'auditable_type' => User::class,
+        'auditable_id' => $user->id,
+    ]);
+
+    $this->deleteJson("/api/v1/users/{$user->id}")
+        ->assertStatus(422)
+        ->assertJsonValidationErrors('user');
+
+    expect(User::find($user->id))->not->toBeNull();
 
     $this->postJson("/api/v1/users/{$user->id}/toggle-active")
         ->assertOk()

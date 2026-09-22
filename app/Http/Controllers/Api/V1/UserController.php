@@ -111,6 +111,12 @@ class UserController extends Controller
             throw ValidationException::withMessages(['user' => ['You cannot delete your own account.']]);
         }
 
+        if ($user->hasActivityRecords()) {
+            throw ValidationException::withMessages([
+                'user' => ['This user has existing activity (reconciliations, imports, or audit history) and cannot be deleted. Deactivate the account instead to preserve that history.'],
+            ]);
+        }
+
         $this->deleteAvatar($user->avatar_path);
         $user->delete();
 
