@@ -5,8 +5,10 @@ use App\Enums\ReconciliationStatus;
 use App\Enums\UserRole;
 use App\Models\BankAccount;
 use App\Models\Reconciliation;
+use App\Models\User;
 use App\Services\Imports\ImportManager;
 use App\Services\Reconciliation\ReconciliationEngine;
+use App\Services\Workflow\PeriodRollForwardService;
 use Illuminate\Http\UploadedFile;
 use Illuminate\Support\Facades\Storage;
 
@@ -114,6 +116,42 @@ it('exposes the BRS through the API and reflects a manual adjustment', function 
         ->assertOk()
         ->assertJsonPath('brs.is_balanced', false)
         ->assertJsonPath('brs.adjusted_book_balance', fn ($v) => (float) $v === 999500.0);
+});
+
+it('clears a check the next period, when the payee only encashes it after roll-forward', function () {
+    // July: the check is issued but nobody has cashed it yet — no bank statement
+    // to match against, so it just sits outstanding.
+    $july = julyReconciliation();
+    importFixture($july, ImportType::Rci, 'rci.xlsx');
+    app(ReconciliationEngine::class)->run($july->fresh());
+
+    $this->assertDatabaseHas('check_issuances', ['serial_no' => '000100001', 'status' => 'outstanding']);
+
+    $july->update(['status' => ReconciliationStatus::Certified]);
+    $august = app(PeriodRollForwardService::class)->createNextPeriod($july->fresh(), User::factory()->create());
+
+    expect($august->period_start->toDateString())->toBe('2026-08-01');
+
+    // The payee finally deposits it in August — it shows up on August's statement,
+    // carried over from a check the RCI recorded back in July.
+    $august->bankTransactions()->create([
+        'bank_account_id' => $august->bank_account_id,
+        'txn_date' => '2026-08-05',
+        'check_no' => '000100001',
+        'description' => 'CHECK CLEARED',
+        'debit' => 10000,
+        'credit' => 0,
+    ]);
+
+    $result = app(ReconciliationEngine::class)->run($august->fresh());
+
+    expect($result['match']['matched'])->toBe(1);
+    $this->assertDatabaseHas('check_issuances', [
+        'serial_no' => '000100001',
+        'status' => 'cleared',
+        // Still tagged to the July reconciliation it was originally recorded under.
+        'reconciliation_id' => $july->id,
+    ]);
 });
 
 it('marks checks older than six months as stale', function () {

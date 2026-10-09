@@ -3,6 +3,7 @@
 use App\Enums\SignatoryBlock;
 use App\Enums\UserRole;
 use App\Models\BankAccount;
+use App\Models\Reconciliation;
 
 function bankAccountPayload(array $overrides = []): array
 {
@@ -60,6 +61,26 @@ it('lets an administrator list, create, update and delete bank accounts', functi
     $this->deleteJson("/api/v1/bank-accounts/{$id}")->assertNoContent();
     $this->assertDatabaseCount('bank_accounts', 0);
     $this->assertDatabaseCount('signatories', 0);
+});
+
+it('will not delete a bank account that has reconciliations or checks, and says so in the list', function () {
+    actingAsRole(UserRole::Admin);
+
+    $empty = BankAccount::factory()->create();
+    $used = BankAccount::factory()->create();
+    Reconciliation::factory()->for($used)->create();
+
+    $rows = collect($this->getJson('/api/v1/bank-accounts')->assertOk()->json('data'))->keyBy('id');
+    expect($rows[$empty->id]['deletable'])->toBeTrue()
+        ->and($rows[$used->id]['deletable'])->toBeFalse();
+
+    $this->deleteJson("/api/v1/bank-accounts/{$used->id}")
+        ->assertUnprocessable()
+        ->assertJsonValidationErrors('bank_account');
+    $this->assertDatabaseHas('bank_accounts', ['id' => $used->id]);
+    $this->assertDatabaseCount('reconciliations', 1);
+
+    $this->deleteJson("/api/v1/bank-accounts/{$empty->id}")->assertNoContent();
 });
 
 it('requires signatories when creating a bank account', function () {

@@ -28,7 +28,8 @@ return [
 
     'allowed_headers' => ['*'],
 
-    'exposed_headers' => [],
+    // Lets the app read the real file name of a download.
+    'exposed_headers' => ['Content-Disposition'],
 
     'max_age' => 0,
 

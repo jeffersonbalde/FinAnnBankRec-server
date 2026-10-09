@@ -79,6 +79,17 @@ it('lets the reviewer and disbursing officer export too', function () {
     }
 });
 
+it('exports the Report of Checks Issued as a valid xlsx', function () {
+    actingAsRole(UserRole::FinancialAnalyst);
+    $reconciliation = reconciledJuly();
+
+    $response = $this->get("/api/v1/reconciliations/{$reconciliation->id}/export/rci.xlsx");
+
+    $response->assertOk()
+        ->assertHeader('content-type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+    expect(substr($response->streamedContent(), 0, 2))->toBe('PK');
+});
+
 it('rejects an export for a guest', function () {
     $reconciliation = reconciledJuly();
 

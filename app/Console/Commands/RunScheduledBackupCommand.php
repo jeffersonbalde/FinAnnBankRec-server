@@ -29,11 +29,12 @@ class RunScheduledBackupCommand extends Command
             'action' => 'system.backup_scheduled',
             'auditable_type' => 'system',
             'auditable_id' => 0,
-            'description' => 'Scheduled backup created',
+            'description' => "Automatic backup saved ({$created['name']})",
             'changes' => [
                 'name' => $created['name'],
                 'size' => $created['size'],
                 'format' => 'sql',
+                'folder' => dirname($created['path']),
             ],
             'ip_address' => null,
         ]);

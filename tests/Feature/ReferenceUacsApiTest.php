@@ -22,6 +22,26 @@ it('lets an administrator manage UACS reference codes', function () {
     $this->deleteJson("/api/v1/reference-uacs/{$id}")->assertNoContent();
 });
 
+it('deletes several UACS codes at once and reports ones that are already gone', function () {
+    actingAsRole(UserRole::Admin);
+    $codes = ReferenceUacs::factory()->count(3)->create();
+    $keep = ReferenceUacs::factory()->create();
+
+    $this->postJson('/api/v1/reference-uacs/bulk-delete', ['ids' => [$codes[0]->id, $codes[1]->id, 999999]])
+        ->assertOk()
+        ->assertJsonPath('deleted', 2)
+        ->assertJsonCount(1, 'skipped');
+
+    $this->assertDatabaseMissing('reference_uacs', ['id' => $codes[0]->id]);
+    $this->assertDatabaseHas('reference_uacs', ['id' => $codes[2]->id]);
+    $this->assertDatabaseHas('reference_uacs', ['id' => $keep->id]);
+
+    $this->postJson('/api/v1/reference-uacs/bulk-delete', ['ids' => []])->assertUnprocessable()->assertJsonValidationErrors('ids');
+
+    actingAsRole(UserRole::FinancialAnalyst);
+    $this->postJson('/api/v1/reference-uacs/bulk-delete', ['ids' => [$keep->id]])->assertForbidden();
+});
+
 it('rejects a duplicate UACS code', function () {
     actingAsRole(UserRole::Admin);
     ReferenceUacs::factory()->create(['code' => '5020202000']);

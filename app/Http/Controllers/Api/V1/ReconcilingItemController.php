@@ -6,11 +6,13 @@ use App\Enums\ReconcilingItemCategory;
 use App\Http\Controllers\Controller;
 use App\Http\Requests\StoreReconcilingItemRequest;
 use App\Http\Resources\ReconcilingItemResource;
+use App\Models\AuditLog;
 use App\Models\Reconciliation;
 use App\Models\ReconcilingItem;
 use App\Services\Reconciliation\BrsCalculator;
 use App\Services\Reconciliation\ReconciliationEngine;
 use Illuminate\Http\JsonResponse;
+use Illuminate\Http\Request;
 use Illuminate\Http\Resources\Json\AnonymousResourceCollection;
 use Illuminate\Validation\ValidationException;
 
@@ -45,6 +47,7 @@ class ReconcilingItemController extends Controller
         ]);
 
         $this->calculator->compute($reconciliation);
+        AuditLog::record($request->user(), 'created', 'Added a manual adjustment ('.$request->float('amount').') to reconciliation #'.$reconciliation->id, $item);
 
         return ReconcilingItemResource::make($item)->response()->setStatusCode(201);
     }
@@ -66,11 +69,12 @@ class ReconcilingItemController extends Controller
         ]);
 
         $this->calculator->compute($reconcilingItem->reconciliation);
+        AuditLog::record($request->user(), 'updated', 'Edited a manual adjustment on reconciliation #'.$reconcilingItem->reconciliation_id, $reconcilingItem);
 
         return ReconcilingItemResource::make($reconcilingItem);
     }
 
-    public function destroy(ReconcilingItem $reconcilingItem): JsonResponse
+    public function destroy(Request $request, ReconcilingItem $reconcilingItem): JsonResponse
     {
         $this->assertManual($reconcilingItem);
         $this->assertEditable($reconcilingItem->reconciliation);
@@ -78,15 +82,17 @@ class ReconcilingItemController extends Controller
         $reconciliation = $reconcilingItem->reconciliation;
         $reconcilingItem->delete();
         $this->calculator->compute($reconciliation);
+        AuditLog::record($request->user(), 'deleted', 'Removed a manual adjustment from reconciliation #'.$reconciliation->id, $reconcilingItem);
 
         return response()->json(null, 204);
     }
 
-    public function regenerate(Reconciliation $reconciliation): JsonResponse
+    public function regenerate(Request $request, Reconciliation $reconciliation): JsonResponse
     {
         $this->assertEditable($reconciliation);
 
         $brs = $this->engine->refresh($reconciliation);
+        AuditLog::record($request->user(), 'updated', 'Refreshed the adjustments of reconciliation #'.$reconciliation->id, $reconciliation);
 
         return response()->json(['brs' => $brs]);
     }

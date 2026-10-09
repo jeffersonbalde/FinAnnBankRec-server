@@ -11,13 +11,14 @@ use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Http\Resources\Json\AnonymousResourceCollection;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Validation\ValidationException;
 
 class BankAccountController extends Controller
 {
     public function index(Request $request): AnonymousResourceCollection
     {
         $accounts = BankAccount::query()
-            ->withCount('signatories')
+            ->withCount(['signatories', 'reconciliations', 'checkIssuances'])
             ->when($request->boolean('active_only'), fn ($q) => $q->where('is_active', true))
             ->orderBy('bank_short_name')
             ->orderBy('account_number')
@@ -63,6 +64,12 @@ class BankAccountController extends Controller
 
     public function destroy(BankAccount $bankAccount): JsonResponse
     {
+        if ($bankAccount->hasRecords()) {
+            throw ValidationException::withMessages([
+                'bank_account' => ['This account has reconciliations or checks recorded against it, so it cannot be deleted. Deactivate it instead to keep that history.'],
+            ]);
+        }
+
         $bankAccount->delete();
 
         return response()->json(null, 204);

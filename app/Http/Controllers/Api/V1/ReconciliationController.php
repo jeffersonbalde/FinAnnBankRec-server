@@ -2,18 +2,28 @@
 
 namespace App\Http\Controllers\Api\V1;
 
+use App\Enums\CheckStatus;
 use App\Enums\ReconciliationStatus;
 use App\Http\Controllers\Controller;
 use App\Http\Requests\StoreReconciliationRequest;
 use App\Http\Resources\ReconciliationResource;
+use App\Models\CheckIssuance;
 use App\Models\Reconciliation;
+use App\Services\Reconciliation\CheckRegisterService;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Http\Resources\Json\AnonymousResourceCollection;
+use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Storage;
 use Illuminate\Validation\ValidationException;
 
 class ReconciliationController extends Controller
 {
+    /** Most reconciliations one bulk request may carry. */
+    private const BULK_LIMIT = 100;
+
+    public function __construct(private readonly CheckRegisterService $register) {}
+
     public function index(Request $request): AnonymousResourceCollection
     {
         $reconciliations = Reconciliation::query()
@@ -74,9 +84,93 @@ class ReconciliationController extends Controller
     {
         $this->assertEditable($reconciliation);
 
-        $reconciliation->delete();
+        $this->remove($reconciliation);
 
         return response()->json(null, 204);
+    }
+
+    /**
+     * Delete several reconciliations at once. Only Draft / Returned ones can go;
+     * any other is skipped and reported, never half-removed.
+     */
+    public function bulkDestroy(Request $request): JsonResponse
+    {
+        $data = $request->validate([
+            'ids' => ['required', 'array', 'min:1', 'max:'.self::BULK_LIMIT],
+            'ids.*' => ['integer', 'distinct'],
+        ]);
+
+        $found = Reconciliation::query()->with('bankAccount')->whereIn('id', $data['ids'])->get()->keyBy('id');
+
+        $deleted = 0;
+        $skipped = [];
+
+        foreach ($data['ids'] as $id) {
+            $reconciliation = $found->get($id);
+
+            if ($reconciliation === null) {
+                $skipped[] = ['id' => $id, 'label' => null, 'reason' => 'Already removed.'];
+
+                continue;
+            }
+
+            if (! $reconciliation->status->isEditable()) {
+                $skipped[] = [
+                    'id' => $id,
+                    'label' => $this->label($reconciliation),
+                    'reason' => 'It is '.$reconciliation->status->label().' and can no longer be changed.',
+                ];
+
+                continue;
+            }
+
+            $this->remove($reconciliation);
+            $deleted++;
+        }
+
+        return response()->json(['deleted' => $deleted, 'skipped' => $skipped]);
+    }
+
+    /**
+     * Remove a period cleanly. Checks stay in the Checks Register (a later period
+     * picks them up); checks this period's statement had cleared become outstanding
+     * again; its statement rows and uploaded files go with it.
+     */
+    private function remove(Reconciliation $reconciliation): void
+    {
+        $storedPaths = $reconciliation->importBatches()->whereNotNull('stored_path')->pluck('stored_path');
+
+        DB::transaction(function () use ($reconciliation): void {
+            $transactionIds = $reconciliation->bankTransactions()->pluck('id');
+
+            if ($transactionIds->isNotEmpty()) {
+                CheckIssuance::query()
+                    ->whereIn('cleared_bank_transaction_id', $transactionIds)
+                    ->update([
+                        'status' => CheckStatus::Outstanding->value,
+                        'cleared_on' => null,
+                        'cleared_bank_transaction_id' => null,
+                    ]);
+            }
+
+            $reconciliation->bankTransactions()->delete();
+            $reconciliation->delete();
+        });
+
+        foreach ($storedPaths as $path) {
+            Storage::delete($path);
+        }
+
+        // Later open periods carry these checks over again.
+        $this->register->refreshOpenPeriods($reconciliation->bank_account_id, $reconciliation->period_start?->toDateString());
+    }
+
+    private function label(Reconciliation $reconciliation): string
+    {
+        $account = $reconciliation->bankAccount;
+
+        return $reconciliation->period_start?->format('M j, Y').' – '.$reconciliation->period_end?->format('M j, Y')
+            .($account ? ' · '.($account->bank_short_name ?: $account->bank_name).' '.$account->account_number : '');
     }
 
     private function assertEditable(Reconciliation $reconciliation): void

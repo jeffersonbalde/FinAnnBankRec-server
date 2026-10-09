@@ -93,6 +93,7 @@ class User extends Authenticatable
             ->exists()
             || ImportBatch::query()->where('uploaded_by', $this->id)->exists()
             || MatchRun::query()->where('run_by', $this->id)->exists()
-            || AuditLog::query()->where('user_id', $this->id)->exists();
+            // Signing in and out leaves a row too, but that alone is not "work" worth keeping the account for.
+            || AuditLog::query()->where('user_id', $this->id)->whereNotIn('action', AuditLog::SESSION_ACTIONS)->exists();
     }
 }

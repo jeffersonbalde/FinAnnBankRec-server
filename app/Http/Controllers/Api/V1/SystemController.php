@@ -44,6 +44,7 @@ class SystemController extends Controller
                 'sql_count' => count($sqlFiles),
                 'latest' => $latest,
                 'schedule' => array_merge($settings, $summary),
+                'folder' => $this->folderPayload($backups),
                 'schedule_enabled' => $settings['enabled'],
                 'schedule_time' => $settings['time'],
                 'retention_days' => $settings['retention_days'],
@@ -59,6 +60,7 @@ class SystemController extends Controller
         return response()->json([
             'data' => $backups->listFiles(),
             'schedule' => array_merge($settings, $summary),
+            'folder' => $this->folderPayload($backups),
             'schedule_enabled' => $settings['enabled'],
             'schedule_time' => $settings['time'],
             'retention_days' => $settings['retention_days'],
@@ -73,7 +75,7 @@ class SystemController extends Controller
         return response()->json(array_merge($settings, $summary));
     }
 
-    public function updateSchedule(Request $request, BackupScheduleService $schedule): JsonResponse
+    public function updateSchedule(Request $request, BackupScheduleService $schedule, DatabaseBackupService $backups): JsonResponse
     {
         $data = $request->validate([
             'enabled' => ['required', 'boolean'],
@@ -83,14 +85,119 @@ class SystemController extends Controller
             'retention_days' => ['required', 'integer', 'min:0', 'max:3650'],
         ]);
 
+        $before = $schedule->get();
         $saved = $schedule->save($data);
-        $summary = $schedule->summary();
 
-        $this->writeAudit($request, 'system.backup_schedule_updated', $saved);
+        $timingChanged = collect(['enabled', 'frequency', 'time', 'weekday'])
+            ->contains(fn (string $key) => $before[$key] !== $saved[$key]);
+        if ($timingChanged) {
+            $schedule->skipCurrentSlot();
+        }
+
+        $this->writeAudit($request, 'system.backup_schedule_updated', [
+            'enabled' => $saved['enabled'],
+            'frequency' => $saved['frequency'],
+            'time' => $saved['time'],
+            'retention_days' => $saved['retention_days'],
+        ], description: 'Updated the automatic backup schedule');
 
         return response()->json([
             'message' => 'Backup schedule saved.',
-            'schedule' => array_merge($saved, $summary),
+            'schedule' => array_merge($schedule->get(), $schedule->summary()),
+            'folder' => $this->folderPayload($backups),
+        ]);
+    }
+
+    /** The folder picker: the folders (or drives) inside `path`. */
+    public function browseFolders(Request $request, DatabaseBackupService $backups): JsonResponse
+    {
+        $data = $request->validate(['path' => ['sometimes', 'nullable', 'string', 'max:500']]);
+
+        try {
+            return response()->json($backups->browse($data['path'] ?? null));
+        } catch (InvalidArgumentException $e) {
+            throw ValidationException::withMessages(['path' => [$e->getMessage()]]);
+        }
+    }
+
+    /**
+     * The full path of a folder the user picked in their browser (the browser
+     * only gives its name) — found through a marker file the page left in it.
+     */
+    public function locateFolder(Request $request, DatabaseBackupService $backups): JsonResponse
+    {
+        $data = $request->validate([
+            'name' => ['required', 'string', 'max:255'],
+            'marker' => ['required', 'string', 'regex:/^\.fabres-check-[a-f0-9]{8,64}$/'],
+        ]);
+
+        return response()->json(['path' => $backups->locateFolder($data['name'], $data['marker'])]);
+    }
+
+    /** The folder picker's "New folder" button. */
+    public function createFolder(Request $request, DatabaseBackupService $backups): JsonResponse
+    {
+        $data = $request->validate([
+            'parent' => ['required', 'string', 'max:500'],
+            'name' => ['required', 'string', 'max:100'],
+        ]);
+
+        try {
+            $path = $backups->createFolder($data['parent'], $data['name']);
+        } catch (InvalidArgumentException $e) {
+            throw ValidationException::withMessages(['name' => [$e->getMessage()]]);
+        }
+
+        return response()->json(['path' => $path], 201);
+    }
+
+    /**
+     * Choose where backups are saved (null = the default folder), optionally
+     * bringing the existing backups along. Takes effect immediately.
+     */
+    public function updateFolder(Request $request, DatabaseBackupService $backups, BackupScheduleService $schedule): JsonResponse
+    {
+        $data = $request->validate([
+            'directory' => ['present', 'nullable', 'string', 'max:500'],
+            'move_existing' => ['sometimes', 'boolean'],
+        ]);
+
+        $previous = $backups->directory();
+        $directory = null;
+
+        if (! empty($data['directory'])) {
+            try {
+                $directory = $backups->prepareFolder($data['directory']);
+            } catch (InvalidArgumentException $e) {
+                throw ValidationException::withMessages(['directory' => [$e->getMessage()]]);
+            }
+
+            // Picking the built-in folder is the same as having no custom folder.
+            if ($backups->isDefaultDirectory($directory)) {
+                $directory = null;
+            }
+        }
+
+        $schedule->save(['directory' => $directory]);
+
+        $moved = $request->boolean('move_existing') ? $backups->moveFiles($previous, $backups->directory()) : 0;
+
+        $this->writeAudit($request, 'system.backup_folder_changed', [
+            'folder' => $backups->directory(),
+            'previous_folder' => $previous,
+            'files_moved' => $moved,
+        ], description: $directory === null ? 'Set backups to be saved in the default folder' : 'Changed the folder where backups are saved');
+
+        $message = 'Backup folder saved.';
+        if ($moved > 0) {
+            $message .= " {$moved} backup ".($moved === 1 ? 'file was' : 'files were').' moved to the new folder.';
+        }
+
+        return response()->json([
+            'message' => $message,
+            'moved' => $moved,
+            'schedule' => array_merge($schedule->get(), $schedule->summary()),
+            'folder' => $this->folderPayload($backups),
         ]);
     }
 
@@ -102,7 +209,8 @@ class SystemController extends Controller
             'name' => $created['name'],
             'size' => $created['size'],
             'format' => 'sql',
-        ]);
+            'folder' => dirname($created['path']),
+        ], description: "Created a backup ({$created['name']})");
 
         return response()->json([
             'message' => 'Backup created successfully.',
@@ -162,9 +270,39 @@ class SystemController extends Controller
             return response()->json(['message' => $e->getMessage()], 404);
         }
 
-        $this->writeAudit($request, 'system.backup_deleted', ['name' => $filename]);
+        $this->writeAudit($request, 'system.backup_deleted', ['name' => $filename], description: "Deleted backup {$filename}");
 
         return response()->json(['message' => 'Backup deleted.']);
+    }
+
+    /** Delete several stored backups at once (each with its JSON companion). */
+    public function bulkDestroyBackups(Request $request, DatabaseBackupService $backups): JsonResponse
+    {
+        $data = $request->validate([
+            'ids' => ['required', 'array', 'min:1', 'max:500'],
+            'ids.*' => ['string', 'distinct', 'regex:/^finann-backup-\d{8}-\d{6}\.sql$/'],
+        ]);
+
+        $deleted = 0;
+        $skipped = [];
+
+        foreach ($data['ids'] as $name) {
+            try {
+                $backups->deleteFile($name);
+                $deleted++;
+            } catch (InvalidArgumentException) {
+                $skipped[] = ['id' => $name, 'label' => $name, 'reason' => 'Already removed.'];
+            }
+        }
+
+        if ($deleted > 0) {
+            $this->writeAudit($request, 'system.backup_deleted', [
+                'count' => $deleted,
+                'names' => array_slice($data['ids'], 0, 20),
+            ], description: "Deleted {$deleted} ".($deleted === 1 ? 'backup' : 'backups'));
+        }
+
+        return response()->json(['deleted' => $deleted, 'skipped' => $skipped]);
     }
 
     /**
@@ -179,7 +317,7 @@ class SystemController extends Controller
         $this->writeAudit($request, 'system.activity_data_cleared', [
             'backup' => $result['backup'],
             'deleted' => $result['deleted'],
-        ]);
+        ], description: 'Cleared all reconciliation data');
 
         return response()->json([
             'message' => 'All reconciliation data was cleared. Users, bank accounts and UACS codes were kept.',
@@ -211,6 +349,21 @@ class SystemController extends Controller
     }
 
     /**
+     * Where backups are kept now, and whether that is the built-in folder.
+     *
+     * @return array{path: string, default_path: string, is_default: bool, problem: string|null}
+     */
+    private function folderPayload(DatabaseBackupService $backups): array
+    {
+        return [
+            'path' => str_replace('/', DIRECTORY_SEPARATOR, $backups->directory()),
+            'default_path' => str_replace('/', DIRECTORY_SEPARATOR, $backups->defaultDirectory()),
+            'is_default' => $backups->customDirectory() === null,
+            'problem' => $backups->folderProblem(),
+        ];
+    }
+
+    /**
      * @param  array<string, mixed>  $changes
      */
     private function writeAudit(
@@ -219,6 +372,7 @@ class SystemController extends Controller
         array $changes = [],
         ?string $auditableType = null,
         mixed $auditableId = null,
+        ?string $description = null,
     ): void {
         $user = $request->user();
 
@@ -228,7 +382,7 @@ class SystemController extends Controller
             'action' => $action,
             'auditable_type' => $auditableType ?? 'system',
             'auditable_id' => $auditableId ?? 0,
-            'description' => $action,
+            'description' => $description ?? $action,
             'changes' => $changes,
             'ip_address' => $request->ip(),
         ]);

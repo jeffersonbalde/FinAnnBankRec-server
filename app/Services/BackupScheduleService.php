@@ -11,7 +11,7 @@ class BackupScheduleService
 {
     public function path(): string
     {
-        return storage_path('app/backup-schedule.json');
+        return (string) config('backup.settings_path', storage_path('app/backup-schedule.json'));
     }
 
     /**
@@ -21,6 +21,7 @@ class BackupScheduleService
      *   time: string,
      *   weekday: int|null,
      *   retention_days: int,
+     *   directory: string|null,
      *   last_run_at: string|null,
      *   last_run_slot: string|null
      * }
@@ -50,6 +51,7 @@ class BackupScheduleService
      *   time: string,
      *   weekday: int|null,
      *   retention_days: int,
+     *   directory: string|null,
      *   last_run_at: string|null,
      *   last_run_slot: string|null
      * }
@@ -80,6 +82,20 @@ class BackupScheduleService
         return $merged;
     }
 
+    /**
+     * Treat today's slot as already handled, so a schedule saved after its time
+     * has passed waits for the next occurrence instead of backing up right away.
+     */
+    public function skipCurrentSlot(?Carbon $now = null): void
+    {
+        $settings = $this->get();
+        $now = ($now ?: now())->copy()->timezone(config('app.timezone', 'UTC'));
+
+        if ($this->isDue($now)) {
+            $this->save(['last_run_slot' => $this->slotKey($now, $settings)]);
+        }
+    }
+
     public function markRan(string $slot, ?Carbon $at = null): void
     {
         $settings = $this->get();
@@ -88,6 +104,11 @@ class BackupScheduleService
         $this->save($settings);
     }
 
+    /**
+     * Due once the scheduled time of today's slot (or this week's day) has come
+     * and that slot has not run yet. A computer that was off at the exact minute
+     * still catches up on the next run instead of skipping the backup.
+     */
     public function isDue(?Carbon $now = null): bool
     {
         $settings = $this->get();
@@ -96,9 +117,8 @@ class BackupScheduleService
         }
 
         $now = ($now ?: now())->copy()->timezone(config('app.timezone', 'UTC'));
-        $time = $settings['time'];
 
-        if ($now->format('H:i') !== $time) {
+        if ($now->format('H:i') < $settings['time']) {
             return false;
         }
 
@@ -109,16 +129,11 @@ class BackupScheduleService
             }
         }
 
-        $slot = $this->slotKey($now, $settings);
-        if ($settings['last_run_slot'] === $slot) {
-            return false;
-        }
-
-        return true;
+        return $settings['last_run_slot'] !== $this->slotKey($now, $settings);
     }
 
     /**
-     * @param  array{enabled: bool, frequency: string, time: string, weekday: int|null, retention_days: int, last_run_at: string|null, last_run_slot: string|null}  $settings
+     * @param  array{enabled: bool, frequency: string, time: string, weekday: int|null, retention_days: int, directory: string|null, last_run_at: string|null, last_run_slot: string|null}  $settings
      */
     public function slotKey(Carbon $now, array $settings): string
     {
@@ -207,6 +222,7 @@ class BackupScheduleService
      *   time: string,
      *   weekday: int|null,
      *   retention_days: int,
+     *   directory: string|null,
      *   last_run_at: string|null,
      *   last_run_slot: string|null
      * }
@@ -219,6 +235,7 @@ class BackupScheduleService
             'time' => (string) config('backup.schedule_time', '02:00'),
             'weekday' => 1,
             'retention_days' => (int) config('backup.retention_days', 30),
+            'directory' => null,
             'last_run_at' => null,
             'last_run_slot' => null,
         ];
@@ -232,6 +249,7 @@ class BackupScheduleService
      *   time: string,
      *   weekday: int|null,
      *   retention_days: int,
+     *   directory: string|null,
      *   last_run_at: string|null,
      *   last_run_slot: string|null
      * }
@@ -254,12 +272,15 @@ class BackupScheduleService
 
         $retention = max(0, (int) ($data['retention_days'] ?? 30));
 
+        $directory = is_string($data['directory'] ?? null) ? trim($data['directory']) : '';
+
         return [
             'enabled' => (bool) ($data['enabled'] ?? false),
             'frequency' => $frequency,
             'time' => $time,
             'weekday' => $frequency === 'weekly' ? $weekday : null,
             'retention_days' => $retention,
+            'directory' => $directory !== '' ? $directory : null,
             'last_run_at' => $data['last_run_at'] ?? null,
             'last_run_slot' => $data['last_run_slot'] ?? null,
         ];

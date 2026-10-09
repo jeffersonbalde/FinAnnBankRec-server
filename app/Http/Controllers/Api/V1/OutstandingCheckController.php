@@ -17,26 +17,7 @@ class OutstandingCheckController extends Controller
     public function index(Request $request): JsonResponse
     {
         $today = CarbonImmutable::now();
-        $search = trim((string) $request->input('search', ''));
-
-        $baseQuery = CheckIssuance::query()
-            ->whereIn('status', [CheckStatus::Outstanding->value, CheckStatus::Stale->value])
-            ->when($request->filled('bank_account_id'), fn ($q) => $q->where('bank_account_id', $request->integer('bank_account_id')))
-            ->when($request->filled('status'), fn ($q) => $q->where('status', $request->string('status')))
-            ->when($search !== '', function ($q) use ($search) {
-                $like = '%'.$search.'%';
-
-                $q->where(function ($inner) use ($like) {
-                    $inner->where('serial_no', 'like', $like)
-                        ->orWhere('payee', 'like', $like)
-                        ->orWhereHas('bankAccount', function ($account) use ($like) {
-                            $account->where('account_number', 'like', $like)
-                                ->orWhere('bank_short_name', 'like', $like)
-                                ->orWhere('bank_name', 'like', $like)
-                                ->orWhere('fund_cluster', 'like', $like);
-                        });
-                });
-            });
+        $baseQuery = CheckIssuance::query()->outstandingFiltered($request->only(['bank_account_id', 'status', 'search']));
 
         $summary = [
             'count' => (clone $baseQuery)->count(),

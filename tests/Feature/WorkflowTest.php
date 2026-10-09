@@ -101,3 +101,12 @@ it('will not roll forward twice', function () {
     $this->postJson("/api/v1/reconciliations/{$reconciliation->id}/roll-forward")->assertCreated();
     $this->postJson("/api/v1/reconciliations/{$reconciliation->id}/roll-forward")->assertStatus(422);
 });
+
+it('only lets the analyst or admin roll a period forward', function () {
+    foreach ([UserRole::BudgetOfficer, UserRole::DisbursingOfficer] as $role) {
+        actingAsRole($role);
+        $reconciliation = balancedReconciliation(ReconciliationStatus::Certified);
+
+        $this->postJson("/api/v1/reconciliations/{$reconciliation->id}/roll-forward")->assertForbidden();
+    }
+});

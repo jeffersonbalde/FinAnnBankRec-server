@@ -9,6 +9,7 @@ use App\Http\Controllers\Api\V1\DashboardController;
 use App\Http\Controllers\Api\V1\ExportController;
 use App\Http\Controllers\Api\V1\ImportBatchController;
 use App\Http\Controllers\Api\V1\MatchController;
+use App\Http\Controllers\Api\V1\MyActivityController;
 use App\Http\Controllers\Api\V1\NotificationController;
 use App\Http\Controllers\Api\V1\OutstandingCheckController;
 use App\Http\Controllers\Api\V1\ReconciliationController;
@@ -27,15 +28,25 @@ Route::prefix('v1')->group(function (): void {
         Route::get('me', [AuthController::class, 'me']);
         Route::post('me/password', [AuthController::class, 'changePassword']);
         Route::post('logout', [AuthController::class, 'logout']);
+        Route::get('users/{user}/avatar', [UserController::class, 'downloadAvatar']);
 
         // Notifications (all roles)
         Route::get('notifications', [NotificationController::class, 'index']);
         Route::post('notifications/read-all', [NotificationController::class, 'markAllRead']);
+        Route::post('notifications/bulk-delete', [NotificationController::class, 'bulkDestroy']);
+        Route::post('notifications/clear', [NotificationController::class, 'clear']);
+        Route::put('notifications/settings', [NotificationController::class, 'updateSettings']);
         Route::post('notifications/{notification}/read', [NotificationController::class, 'markRead']);
+
+        // My Activity — a person's own footprints (all roles; only ever their own)
+        Route::get('my-activity', [MyActivityController::class, 'index']);
+        Route::post('my-activity/clear', [MyActivityController::class, 'clear']);
+        Route::put('my-activity/settings', [MyActivityController::class, 'updateSettings']);
 
         // Dashboard & registers (all roles)
         Route::get('dashboard', [DashboardController::class, 'index']);
         Route::get('outstanding-checks', [OutstandingCheckController::class, 'index']);
+        Route::get('outstanding-checks/export.xlsx', [ExportController::class, 'outstandingXlsx']);
 
         // Workflow transitions (role enforced inside WorkflowService)
         Route::post('reconciliations/{reconciliation}/submit', [WorkflowController::class, 'submit']);
@@ -54,10 +65,18 @@ Route::prefix('v1')->group(function (): void {
             Route::get('reconciliations/{reconciliation}/brs', [BrsController::class, 'show']);
             Route::get('reconciliations/{reconciliation}/matches', [MatchController::class, 'index']);
             Route::get('reconciliations/{reconciliation}/reconciling-items', [ReconcilingItemController::class, 'index']);
+            Route::get('reconciliations/{reconciliation}/check-issuances', [CheckIssuanceController::class, 'index']);
+
+            // Checks Register — the shared, system-wide Report of Checks Issued.
+            Route::get('check-register/bank-accounts', [CheckIssuanceController::class, 'bankAccounts']);
+            Route::get('check-register/uacs-codes', [CheckIssuanceController::class, 'uacsCodes']);
+            Route::get('check-register', [CheckIssuanceController::class, 'register']);
+            Route::get('check-register/export.xlsx', [ExportController::class, 'registerXlsx']);
 
             Route::get('reconciliations/{reconciliation}/export/brs.xlsx', [ExportController::class, 'brsXlsx']);
             Route::get('reconciliations/{reconciliation}/export/schedule-1.xlsx', [ExportController::class, 'scheduleXlsx']);
             Route::get('reconciliations/{reconciliation}/export/brs.pdf', [ExportController::class, 'brsPdf']);
+            Route::get('reconciliations/{reconciliation}/export/rci.xlsx', [ExportController::class, 'rciXlsx']);
         });
 
         /*
@@ -71,6 +90,12 @@ Route::prefix('v1')->group(function (): void {
             Route::post('imports/{importBatch}/commit', [ImportBatchController::class, 'commit']);
             Route::delete('imports/{importBatch}', [ImportBatchController::class, 'destroy']);
 
+            // Record / correct / remove checks in the register (the RCI file import
+            // above is the other way in).
+            Route::post('check-register', [CheckIssuanceController::class, 'store']);
+            Route::put('check-issuances/{checkIssuance}', [CheckIssuanceController::class, 'update']);
+            Route::delete('check-issuances/{checkIssuance}', [CheckIssuanceController::class, 'destroy']);
+            Route::post('check-register/bulk-delete', [CheckIssuanceController::class, 'bulkDestroy']);
             Route::post('check-issuances/{checkIssuance}/cancel', [CheckIssuanceController::class, 'cancel']);
         });
 
@@ -81,6 +106,7 @@ Route::prefix('v1')->group(function (): void {
         */
         Route::middleware('role:financial_analyst,admin')->group(function (): void {
             Route::apiResource('reconciliations', ReconciliationController::class)->except(['index', 'show']);
+            Route::post('reconciliations/bulk-delete', [ReconciliationController::class, 'bulkDestroy']);
 
             Route::post('reconciliations/{reconciliation}/match', [MatchController::class, 'run']);
             Route::post('matches/{bankTransaction}/link', [MatchController::class, 'link']);
@@ -102,6 +128,10 @@ Route::prefix('v1')->group(function (): void {
         */
         Route::middleware('role:admin')->group(function (): void {
             Route::get('audit-logs', [AuditLogController::class, 'index']);
+            Route::get('audit-logs/people', [AuditLogController::class, 'people']);
+            Route::post('audit-logs/clear', [AuditLogController::class, 'clear']);
+            Route::get('audit-logs/settings', [AuditLogController::class, 'settings']);
+            Route::put('audit-logs/settings', [AuditLogController::class, 'updateSettings']);
 
             Route::post('users/{user}/toggle-active', [UserController::class, 'toggleActive']);
             Route::apiResource('users', UserController::class);
@@ -111,12 +141,14 @@ Route::prefix('v1')->group(function (): void {
                 ->shallow()
                 ->except(['show']);
 
+            Route::post('reference-uacs/bulk-delete', [ReferenceUacsController::class, 'bulkDestroy']);
             Route::apiResource('reference-uacs', ReferenceUacsController::class)
                 ->parameters(['reference-uacs' => 'referenceUac']);
 
             Route::get('system/status', [SystemController::class, 'status']);
             Route::get('system/backups', [SystemController::class, 'indexBackups']);
             Route::post('system/backups', [SystemController::class, 'createBackup']);
+            Route::post('system/backups/bulk-delete', [SystemController::class, 'bulkDestroyBackups']);
             Route::get('system/backups/{filename}', [SystemController::class, 'downloadBackup'])
                 ->where('filename', 'finann-backup-\d{8}-\d{6}\.(sql|json)');
             Route::delete('system/backups/{filename}', [SystemController::class, 'destroyBackup'])
@@ -124,6 +156,10 @@ Route::prefix('v1')->group(function (): void {
             Route::get('system/backup', [SystemController::class, 'downloadFreshBackup']);
             Route::get('system/backup-schedule', [SystemController::class, 'showSchedule']);
             Route::put('system/backup-schedule', [SystemController::class, 'updateSchedule']);
+            Route::get('system/backup-folders', [SystemController::class, 'browseFolders']);
+            Route::post('system/backup-folders', [SystemController::class, 'createFolder']);
+            Route::post('system/backup-folders/locate', [SystemController::class, 'locateFolder']);
+            Route::put('system/backup-folder', [SystemController::class, 'updateFolder']);
             Route::delete('system/activity-data', [SystemController::class, 'clearActivityData']);
             Route::put('system/password', [SystemController::class, 'changePassword']);
         });

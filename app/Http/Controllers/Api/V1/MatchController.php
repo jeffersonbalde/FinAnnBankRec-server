@@ -7,6 +7,7 @@ use App\Enums\MatchStatus;
 use App\Http\Controllers\Controller;
 use App\Http\Resources\BankTransactionResource;
 use App\Http\Resources\CheckIssuanceResource;
+use App\Models\AuditLog;
 use App\Models\BankTransaction;
 use App\Models\Reconciliation;
 use App\Services\Reconciliation\BrsCalculator;
@@ -30,6 +31,7 @@ class MatchController extends Controller
         $this->assertEditable($reconciliation);
 
         $result = $this->engine->run($reconciliation, $request->user()->id);
+        AuditLog::record($request->user(), 'updated', 'Matched checks with the bank statement for reconciliation #'.$reconciliation->id, $reconciliation);
 
         return response()->json([
             'match' => $result['match'],
@@ -67,11 +69,12 @@ class MatchController extends Controller
         ]);
 
         $this->engine->refresh($reconciliation);
+        AuditLog::record($request->user(), 'updated', 'Linked check '.$check->serial_no.' to a bank transaction', $reconciliation);
 
         return response()->json($this->boardPayload($reconciliation->refresh()));
     }
 
-    public function unlink(BankTransaction $bankTransaction): JsonResponse
+    public function unlink(Request $request, BankTransaction $bankTransaction): JsonResponse
     {
         $reconciliation = $bankTransaction->reconciliation;
         $this->assertEditable($reconciliation);
@@ -92,6 +95,7 @@ class MatchController extends Controller
         ]);
 
         $this->engine->refresh($reconciliation);
+        AuditLog::record($request->user(), 'updated', 'Unlinked a bank transaction from its check', $reconciliation);
 
         return response()->json($this->boardPayload($reconciliation->refresh()));
     }
@@ -102,7 +106,12 @@ class MatchController extends Controller
     private function boardPayload(Reconciliation $reconciliation): array
     {
         $checks = $reconciliation->bankAccount->checkIssuances()
+            ->with('reconciliation')
             ->where('status', '!=', CheckStatus::Cancelled->value)
+            // Only what matters to this period: checks issued by its end (a later month's are not yet
+            // outstanding), leaving out those the bank already cleared before it began.
+            ->where(fn ($q) => $q->whereNull('check_date')->orWhere('check_date', '<=', $reconciliation->period_end))
+            ->where(fn ($q) => $q->whereNull('cleared_on')->orWhere('cleared_on', '>=', $reconciliation->period_start))
             ->orderBy('check_date')
             ->orderBy('serial_no')
             ->get();

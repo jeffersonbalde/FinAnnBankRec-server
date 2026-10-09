@@ -4,6 +4,7 @@ namespace App\Models;
 
 use App\Enums\ReconciliationStatus;
 use App\Models\Concerns\RecordsAudit;
+use App\Services\Reconciliation\CheckRegisterService;
 use Database\Factories\ReconciliationFactory;
 use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Model;
@@ -37,6 +38,12 @@ class Reconciliation extends Model
         'certified_at',
         'review_remarks',
     ];
+
+    protected static function booted(): void
+    {
+        // Checks typed into the register before this period existed now belong to it.
+        static::created(fn (Reconciliation $reconciliation) => app(CheckRegisterService::class)->adoptUnassigned($reconciliation));
+    }
 
     protected function casts(): array
     {
@@ -100,6 +107,24 @@ class Reconciliation extends Model
     public function matchRuns(): HasMany
     {
         return $this->hasMany(MatchRun::class);
+    }
+
+    /**
+     * Why this period's checks cannot be added to, changed or removed — in plain
+     * words for the person who tried — or null while the period is still open.
+     */
+    public function checksLockedReason(): ?string
+    {
+        if ($this->status->isEditable()) {
+            return null;
+        }
+
+        $period = $this->period_start?->format('M j, Y').' – '.$this->period_end?->format('M j, Y');
+
+        return match ($this->status) {
+            ReconciliationStatus::Certified => "It belongs to the {$period} reconciliation, which is Certified and locked.",
+            default => "It belongs to the {$period} reconciliation, which is {$this->status->label()}. It has to be returned for revision before this check can change.",
+        };
     }
 
     public function latestMatchRun(): ?MatchRun

@@ -2,12 +2,14 @@
 
 namespace App\Http\Controllers\Api\V1;
 
+use App\Enums\UserRole;
 use App\Http\Controllers\Controller;
 use App\Http\Requests\ReturnReconciliationRequest;
 use App\Http\Resources\ReconciliationResource;
 use App\Models\Reconciliation;
 use App\Services\Workflow\PeriodRollForwardService;
 use App\Services\Workflow\WorkflowService;
+use Illuminate\Auth\Access\AuthorizationException;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 
@@ -37,6 +39,11 @@ class WorkflowController extends Controller
 
     public function rollForward(Request $request, Reconciliation $reconciliation): JsonResponse
     {
+        // Preparing the next period is the Financial Analyst's job (the screen only offers it to them).
+        if (! $request->user()->hasRole(UserRole::FinancialAnalyst, UserRole::Admin)) {
+            throw new AuthorizationException('Your role cannot perform this workflow action.');
+        }
+
         $next = $this->rollForward->createNextPeriod($reconciliation, $request->user());
 
         return ReconciliationResource::make($next->load('bankAccount'))->response()->setStatusCode(201);

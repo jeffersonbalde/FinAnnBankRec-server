@@ -7,7 +7,13 @@ return [
     | Backup storage directory
     |--------------------------------------------------------------------------
     */
-    'path' => env('BACKUP_PATH', storage_path('app/backups')),
+    // Windows: a normal folder on the system drive (created automatically). Elsewhere: inside the app.
+    'path' => env('BACKUP_PATH', PHP_OS_FAMILY === 'Windows'
+        ? (getenv('SystemDrive') ?: 'C:').'\\FABReS Backups'
+        : storage_path('app/backups')),
+
+    // Where the schedule and chosen-folder settings are kept (tests point this elsewhere).
+    'settings_path' => env('BACKUP_SETTINGS_PATH', storage_path('app/backup-schedule.json')),
 
     /*
     |--------------------------------------------------------------------------

@@ -13,8 +13,10 @@ use Illuminate\Http\Request;
 use Illuminate\Http\Resources\Json\AnonymousResourceCollection;
 use Illuminate\Http\UploadedFile;
 use Illuminate\Support\Facades\Storage;
+use Illuminate\Support\Str;
 use Illuminate\Validation\Rule;
 use Illuminate\Validation\ValidationException;
+use Symfony\Component\HttpFoundation\StreamedResponse;
 
 class UserController extends Controller
 {
@@ -121,6 +123,16 @@ class UserController extends Controller
         $user->delete();
 
         return response()->json(null, 204);
+    }
+
+    /** A person's profile photo as a file download (any signed-in user may view photos). */
+    public function downloadAvatar(User $user): StreamedResponse
+    {
+        abort_unless($user->avatar_path && Storage::disk('public')->exists($user->avatar_path), 404, 'This user has no photo.');
+
+        $extension = pathinfo($user->avatar_path, PATHINFO_EXTENSION) ?: 'jpg';
+
+        return Storage::disk('public')->download($user->avatar_path, Str::slug($user->name).'-photo.'.$extension);
     }
 
     private function storeAvatar(?UploadedFile $file): ?string

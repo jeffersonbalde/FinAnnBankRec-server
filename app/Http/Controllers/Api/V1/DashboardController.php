@@ -5,49 +5,92 @@ namespace App\Http\Controllers\Api\V1;
 use App\Enums\CheckStatus;
 use App\Enums\ReconciliationStatus;
 use App\Http\Controllers\Controller;
-use App\Models\AuditLog;
 use App\Models\BankAccount;
 use App\Models\CheckIssuance;
 use App\Models\Reconciliation;
 use Carbon\CarbonImmutable;
+use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Http\JsonResponse;
+use Illuminate\Http\Request;
 use Illuminate\Support\Collection;
 
 class DashboardController extends Controller
 {
-    public function index(): JsonResponse
+    /**
+     * Summary figures for the dashboard. Everything can be narrowed to a date
+     * range and/or one bank account; with no filters it covers all time.
+     *
+     * - Reconciliation figures use the periods that overlap the range.
+     * - Check figures use the checks whose date falls inside the range.
+     */
+    public function index(Request $request): JsonResponse
     {
+        $filters = $request->validate([
+            'date_from' => ['nullable', 'date'],
+            'date_to' => ['nullable', 'date', 'after_or_equal:date_from'],
+            'bank_account_id' => ['nullable', 'integer', 'exists:bank_accounts,id'],
+        ]);
+
+        $from = $filters['date_from'] ?? null;
+        $to = $filters['date_to'] ?? null;
+        $bankAccountId = $filters['bank_account_id'] ?? null;
+
+        $reconciliations = fn (): Builder => $this->scopeReconciliations(Reconciliation::query(), $from, $to, $bankAccountId);
+        $checks = fn (): Builder => $this->scopeChecks(CheckIssuance::query(), $from, $to, $bankAccountId);
+
         $today = CarbonImmutable::now();
 
-        $outstanding = CheckIssuance::query()
+        $outstanding = $checks()
             ->whereIn('status', [CheckStatus::Outstanding->value, CheckStatus::Stale->value])
             ->get(['amount', 'status', 'check_date']);
 
+        $issued = $checks()->where('status', '!=', CheckStatus::Cancelled->value);
+
         return response()->json([
-            'open_reconciliations' => Reconciliation::query()
+            'filters' => ['date_from' => $from, 'date_to' => $to, 'bank_account_id' => $bankAccountId],
+            'open_reconciliations' => $reconciliations()
                 ->whereIn('status', [
                     ReconciliationStatus::Draft->value,
                     ReconciliationStatus::ForReview->value,
                     ReconciliationStatus::Returned->value,
                 ])->count(),
-            'for_review' => Reconciliation::query()->where('status', ReconciliationStatus::ForReview->value)->count(),
+            'for_review' => $reconciliations()->where('status', ReconciliationStatus::ForReview->value)->count(),
+            'certified' => $reconciliations()->where('status', ReconciliationStatus::Certified->value)->count(),
+            'checks_issued_count' => (clone $issued)->count(),
+            'checks_issued_amount' => round((float) (clone $issued)->sum('amount'), 2),
             'outstanding_checks_count' => $outstanding->count(),
             'outstanding_checks_amount' => round((float) $outstanding->sum('amount'), 2),
             'stale_checks_count' => $outstanding->where('status', CheckStatus::Stale->value)->count(),
             'aging' => $this->aging($outstanding, $today),
-            'per_fund' => $this->perFund(),
-            'status_breakdown' => $this->statusBreakdown(),
-            'balance_trend' => $this->balanceTrend(),
-            'recent_activity' => AuditLog::query()
-                ->latest()
-                ->limit(12)
-                ->get(['user_name', 'action', 'description', 'auditable_type', 'auditable_id', 'created_at'])
-                ->map(fn (AuditLog $log) => [
-                    'who' => $log->user_name ?? 'System',
-                    'what' => $log->description,
-                    'when' => $log->created_at,
-                ]),
+            'per_fund' => $this->perFund($from, $to, $bankAccountId),
+            'status_breakdown' => $this->statusBreakdown($reconciliations()),
+            'balance_trend' => $this->balanceTrend($reconciliations()),
         ]);
+    }
+
+    /**
+     * @param  Builder<Reconciliation>  $query
+     * @return Builder<Reconciliation>
+     */
+    private function scopeReconciliations(Builder $query, ?string $from, ?string $to, ?int $bankAccountId): Builder
+    {
+        return $query
+            ->when($bankAccountId, fn (Builder $q) => $q->where('bank_account_id', $bankAccountId))
+            // A period is in range when it overlaps it, so a weekly or monthly one is never half-counted.
+            ->when($from, fn (Builder $q) => $q->whereDate('period_end', '>=', $from))
+            ->when($to, fn (Builder $q) => $q->whereDate('period_start', '<=', $to));
+    }
+
+    /**
+     * @param  Builder<CheckIssuance>  $query
+     * @return Builder<CheckIssuance>
+     */
+    private function scopeChecks(Builder $query, ?string $from, ?string $to, ?int $bankAccountId): Builder
+    {
+        return $query
+            ->when($bankAccountId, fn (Builder $q) => $q->where('bank_account_id', $bankAccountId))
+            ->when($from, fn (Builder $q) => $q->whereDate('check_date', '>=', $from))
+            ->when($to, fn (Builder $q) => $q->whereDate('check_date', '<=', $to));
     }
 
     /**
@@ -80,11 +123,12 @@ class DashboardController extends Controller
      * Every reconciliation's status, counted — including statuses with
      * zero records, so a pie/donut chart always shows the full workflow.
      *
+     * @param  Builder<Reconciliation>  $reconciliations
      * @return list<array{status: string, label: string, count: int}>
      */
-    private function statusBreakdown(): array
+    private function statusBreakdown(Builder $reconciliations): array
     {
-        $counts = Reconciliation::query()
+        $counts = $reconciliations
             ->selectRaw('status, count(*) as aggregate')
             ->groupBy('status')
             ->pluck('aggregate', 'status');
@@ -99,14 +143,15 @@ class DashboardController extends Controller
     }
 
     /**
-     * The last 8 reconciliations (across all bank accounts) in period
-     * order, for a book-vs-bank balance trend chart.
+     * The last 8 reconciliations in range (across the chosen bank accounts) in
+     * period order, for a book-vs-bank balance trend chart.
      *
+     * @param  Builder<Reconciliation>  $reconciliations
      * @return list<array<string, mixed>>
      */
-    private function balanceTrend(): array
+    private function balanceTrend(Builder $reconciliations): array
     {
-        return Reconciliation::query()
+        return $reconciliations
             ->with('bankAccount')
             ->orderByDesc('period_end')
             ->limit(8)
@@ -124,13 +169,20 @@ class DashboardController extends Controller
     }
 
     /**
+     * Each active bank account with its latest reconciliation inside the range.
+     *
      * @return list<array<string, mixed>>
      */
-    private function perFund(): array
+    private function perFund(?string $from, ?string $to, ?int $bankAccountId): array
     {
         return BankAccount::query()
             ->where('is_active', true)
-            ->with(['reconciliations' => fn ($q) => $q->latest('period_end')->limit(1)])
+            ->when($bankAccountId, fn (Builder $q) => $q->whereKey($bankAccountId))
+            ->with(['reconciliations' => fn ($q) => $q
+                ->when($from, fn ($q) => $q->whereDate('period_end', '>=', $from))
+                ->when($to, fn ($q) => $q->whereDate('period_start', '<=', $to))
+                ->latest('period_end')
+                ->limit(1)])
             ->get()
             ->map(function (BankAccount $account) {
                 $latest = $account->reconciliations->first();

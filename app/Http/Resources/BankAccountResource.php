@@ -27,6 +27,11 @@ class BankAccountResource extends JsonResource
             'is_active' => $this->is_active,
             'signatories' => SignatoryResource::collection($this->whenLoaded('signatories')),
             'signatories_count' => $this->whenCounted('signatories'),
+            // Only known on the list, where the counts are loaded: an account with records is deactivated, not deleted.
+            'deletable' => $this->when(
+                isset($this->reconciliations_count, $this->check_issuances_count),
+                fn () => $this->reconciliations_count === 0 && $this->check_issuances_count === 0,
+            ),
             'created_at' => $this->created_at,
         ];
     }

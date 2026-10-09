@@ -53,4 +53,16 @@ class BankAccount extends Model
     {
         return $this->hasMany(CheckIssuance::class);
     }
+
+    /**
+     * Whether any reconciliation work hangs off this account. Deleting it would
+     * wipe all of that (the foreign keys cascade), so the account is only
+     * deleted while it is still empty — otherwise it is deactivated instead.
+     */
+    public function hasRecords(): bool
+    {
+        return $this->reconciliations()->exists()
+            || $this->checkIssuances()->exists()
+            || BankTransaction::query()->where('bank_account_id', $this->id)->exists();
+    }
 }

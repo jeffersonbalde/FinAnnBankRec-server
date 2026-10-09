@@ -235,6 +235,8 @@ class SampleActivitySeeder extends Seeder
             'amount' => mt_rand(2_500, 480_000) + mt_rand(0, 99) / 100,
             'status' => CheckStatus::Outstanding,
             'report_no' => $reconciliation->report_no,
+            'created_by' => $batch->uploaded_by,
+            'updated_by' => $batch->uploaded_by,
         ]);
     }
 

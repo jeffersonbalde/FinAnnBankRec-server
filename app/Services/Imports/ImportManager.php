@@ -4,9 +4,13 @@ namespace App\Services\Imports;
 
 use App\Enums\CheckStatus;
 use App\Enums\ImportType;
+use App\Enums\ReconciliationStatus;
+use App\Models\CheckIssuance;
 use App\Models\ImportBatch;
 use App\Models\Reconciliation;
 use App\Services\Reconciliation\BrsCalculator;
+use App\Services\Reconciliation\CheckRegisterService;
+use App\Services\Reconciliation\ReconciliationEngine;
 use Illuminate\Http\UploadedFile;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Storage;
@@ -68,7 +72,14 @@ class ImportManager
         $reconciliation = $batch->reconciliation()->firstOrFail();
         $rows = $batch->parsed_preview ?? [];
 
-        DB::transaction(function () use ($batch, $reconciliation, $rows): void {
+        $replaced = false;
+
+        DB::transaction(function () use ($batch, $reconciliation, $rows, &$replaced): void {
+            // A period has one bank statement: a new one replaces the one already on file, not adds to it.
+            if ($batch->type === ImportType::BankStatement) {
+                $replaced = $this->discardOtherStatements($batch, $reconciliation) > 0;
+            }
+
             match ($batch->type) {
                 ImportType::Rci => $this->commitRci($batch, $reconciliation, $rows),
                 ImportType::BankStatement => $this->commitBankStatement($batch, $reconciliation, $rows),
@@ -82,13 +93,41 @@ class ImportManager
             ]);
         });
 
+        // The old statement's matches went with it: match the checks against the new one straight away.
+        if ($replaced) {
+            app(ReconciliationEngine::class)->run($reconciliation->fresh(), $batch->uploaded_by);
+        }
+
+        // New checks change what is outstanding: bring every open reconciliation of the account up to date,
+        // as adding a check by hand does.
+        if ($batch->type === ImportType::Rci) {
+            app(CheckRegisterService::class)->refreshOpenPeriods($reconciliation->bank_account_id, $this->earliestDate($rows));
+        }
+
         return $batch->refresh();
     }
 
-    public function discard(ImportBatch $batch): void
+    /**
+     * Remove an import. For a committed bank statement this also lets go of the checks it had
+     * cleared, so nothing stays "Cleared" against a statement line that no longer exists.
+     */
+    public function discard(ImportBatch $batch, bool $refresh = true): void
     {
-        DB::transaction(function () use ($batch): void {
-            $batch->checkIssuances()->delete();
+        $releasedStatement = $batch->type === ImportType::BankStatement && $batch->status === 'committed';
+
+        $removedFrom = $batch->type === ImportType::Rci ? $this->earliestDate($batch->parsed_preview ?? []) : null;
+
+        DB::transaction(function () use ($batch, $releasedStatement): void {
+            // Take back the checks this file brought in — but only those that are still outstanding and in a period
+            // that can change. A check that has cleared or been cancelled stays in the register as part of the record.
+            $batch->checkIssuances()
+                ->whereIn('status', [CheckStatus::Outstanding->value, CheckStatus::Stale->value])
+                ->where(fn ($q) => $q->whereNull('reconciliation_id')->orWhereHas('reconciliation', fn ($r) => $r->whereIn('status', [ReconciliationStatus::Draft->value, ReconciliationStatus::Returned->value])))
+                ->delete();
+
+            if ($releasedStatement) {
+                $this->releaseClearedChecks($batch);
+            }
             $batch->bankTransactions()->delete();
 
             $this->clearStatementBalance($batch);
@@ -99,6 +138,73 @@ class ImportManager
 
             $batch->delete();
         });
+
+        if ($releasedStatement && $refresh && $batch->reconciliation !== null) {
+            app(ReconciliationEngine::class)->refresh($batch->reconciliation->fresh());
+        }
+
+        if ($batch->type === ImportType::Rci && $batch->status === 'committed' && $refresh && $batch->bank_account_id !== null) {
+            app(CheckRegisterService::class)->refreshOpenPeriods($batch->bank_account_id, $removedFrom);
+        }
+    }
+
+    /**
+     * The earliest check date in the rows, or null when any has none (so every period is refreshed).
+     *
+     * @param  list<array<string, mixed>>  $rows
+     */
+    private function earliestDate(array $rows): ?string
+    {
+        $dates = array_map(fn (array $row) => $row['check_date'] ?? null, $rows);
+
+        return $dates === [] || in_array(null, $dates, true) ? null : min($dates);
+    }
+
+    /**
+     * Take back a statement's balance after the statement it came from is gone, using the
+     * one now on file (an analyst's own typed figure is never overwritten).
+     */
+    public function restoreStatementBalance(ImportBatch $current): void
+    {
+        $reconciliation = $current->reconciliation;
+
+        if ($reconciliation !== null) {
+            $this->applyStatementBalance($reconciliation, $this->suggestedBalanceFromRows($current->parsed_preview ?? []));
+        }
+    }
+
+    /**
+     * Discard every other committed bank statement of this period. Returns how many went.
+     */
+    public function discardOtherStatements(ImportBatch $keep, Reconciliation $reconciliation): int
+    {
+        $others = ImportBatch::query()
+            ->where('reconciliation_id', $reconciliation->id)
+            ->where('type', ImportType::BankStatement->value)
+            ->where('status', 'committed')
+            ->whereKeyNot($keep->id)
+            ->get();
+
+        $others->each(fn (ImportBatch $old) => $this->discard($old, refresh: false));
+
+        return $others->count();
+    }
+
+    private function releaseClearedChecks(ImportBatch $batch): void
+    {
+        $transactionIds = $batch->bankTransactions()->pluck('id');
+
+        if ($transactionIds->isEmpty()) {
+            return;
+        }
+
+        CheckIssuance::query()
+            ->whereIn('cleared_bank_transaction_id', $transactionIds)
+            ->update([
+                'status' => CheckStatus::Outstanding->value,
+                'cleared_on' => null,
+                'cleared_bank_transaction_id' => null,
+            ]);
     }
 
     /**
@@ -140,13 +246,34 @@ class ImportManager
         // Re-importing this batch: drop its previous rows first.
         $batch->checkIssuances()->delete();
 
+        $account = $reconciliation->bankAccount;
+        $register = app(CheckRegisterService::class);
+
         foreach ($rows as $row) {
-            $reconciliation->bankAccount->checkIssuances()->updateOrCreate(
-                ['serial_no' => $row['serial_no']],
+            $date = $row['check_date'] ?? null;
+
+            // A check already sitting in a period that is with the reviewer, or certified, is left as it is.
+            $existing = $account->checkIssuances()->where('serial_no', $row['serial_no'])->with('reconciliation')->first();
+            if ($existing?->reconciliation?->checksLockedReason() !== null) {
+                continue;
+            }
+
+            // A check belongs to the period its date falls in — wherever the file was uploaded from.
+            // Only a check with no date at all falls back to the reconciliation it was uploaded into.
+            $period = $register->periodFor($account->id, $date);
+            $periodId = $date === null ? $reconciliation->id : ($period?->status->isEditable() ? $period->id : null);
+
+            // A check already on file keeps its status: importing the report again must not turn a cleared,
+            // stale or cancelled check back into an outstanding one. Only a new check starts out outstanding.
+            $check = $account->checkIssuances()->firstOrNew(['serial_no' => $row['serial_no']]);
+            $isNew = ! $check->exists;
+
+            $check->fill(
                 [
-                    'reconciliation_id' => $reconciliation->id,
+                    'updated_by' => $batch->uploaded_by,
+                    'reconciliation_id' => $periodId,
                     'import_batch_id' => $batch->id,
-                    'check_date' => $row['check_date'] ?? null,
+                    'check_date' => $date,
                     'dv_no' => $row['dv_no'] ?? null,
                     'or_burs_no' => $row['or_burs_no'] ?? null,
                     'responsibility_center_code' => $row['responsibility_center_code'] ?? null,
@@ -157,9 +284,15 @@ class ImportManager
                     'gross_taxable_amount' => $row['gross_taxable_amount'] ?? null,
                     'withholding_tax' => $row['withholding_tax'] ?? null,
                     'report_no' => $row['report_no'] ?? null,
-                    'status' => CheckStatus::Outstanding,
                 ],
             );
+
+            if ($isNew) {
+                $check->status = CheckStatus::Outstanding;
+                $check->created_by = $batch->uploaded_by;
+            }
+
+            $check->save();
         }
     }
 

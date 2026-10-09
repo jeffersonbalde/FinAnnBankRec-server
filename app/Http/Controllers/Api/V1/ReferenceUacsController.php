@@ -47,4 +47,27 @@ class ReferenceUacsController extends Controller
 
         return response()->json(null, 204);
     }
+
+    /**
+     * Delete several codes at once. Checks keep the code they were saved with,
+     * so removing a code from this list never breaks a record.
+     */
+    public function bulkDestroy(Request $request): JsonResponse
+    {
+        $data = $request->validate([
+            'ids' => ['required', 'array', 'min:1', 'max:100'],
+            'ids.*' => ['integer', 'distinct'],
+        ]);
+
+        $codes = ReferenceUacs::query()->whereIn('id', $data['ids'])->get();
+        $codes->each->delete();
+
+        return response()->json([
+            'deleted' => $codes->count(),
+            'skipped' => collect($data['ids'])
+                ->diff($codes->pluck('id'))
+                ->map(fn ($id) => ['id' => $id, 'label' => null, 'reason' => 'Already removed.'])
+                ->values(),
+        ]);
+    }
 }

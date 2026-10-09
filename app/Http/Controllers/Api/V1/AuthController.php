@@ -4,6 +4,7 @@ namespace App\Http\Controllers\Api\V1;
 
 use App\Http\Controllers\Controller;
 use App\Http\Resources\UserResource;
+use App\Models\AuditLog;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Auth;
@@ -41,6 +42,8 @@ class AuthController extends Controller
             $request->session()->regenerate();
         }
 
+        AuditLog::record($request->user(), 'login', 'Signed in to the system');
+
         return UserResource::make($request->user())
             ->response()
             ->setStatusCode(200);
@@ -73,6 +76,7 @@ class AuthController extends Controller
         }
 
         $user->update(['password' => $data['password']]);
+        AuditLog::record($user, 'password_changed', 'Changed own password');
 
         return response()->json(['message' => 'Password updated.']);
     }
@@ -82,6 +86,10 @@ class AuthController extends Controller
      */
     public function logout(Request $request): JsonResponse
     {
+        if ($request->user()) {
+            AuditLog::record($request->user(), 'logout', 'Signed out of the system');
+        }
+
         $this->clearSession($request);
 
         return response()->json(['message' => 'Logged out.']);
