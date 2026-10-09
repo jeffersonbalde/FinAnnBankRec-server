@@ -55,13 +55,17 @@ class RciImportParser implements ImportParser
                 continue;
             }
 
-            if (str_contains($joined, 'certification') || str_contains($joined, 'i hereby certify')) {
-                break;
-            }
-
             $serial = CellValue::string($row[self::COL_SERIAL] ?? null);
             $payee = CellValue::string($row[self::COL_PAYEE] ?? null);
             $amountRaw = $row[self::COL_AMOUNT] ?? null;
+
+            // The certification block under the table ends the data. A check row that only MENTIONS the
+            // word (e.g. "…Certification Support Program") is still a check, so it must not stop the import.
+            if ((str_contains($joined, 'certification') || str_contains($joined, 'i hereby certify'))
+                && $serial === null && CellValue::decimal($amountRaw) === null) {
+                break;
+            }
+
             $rowHasContent = trim(implode('', $row)) !== '';
 
             if (! $rowHasContent) {

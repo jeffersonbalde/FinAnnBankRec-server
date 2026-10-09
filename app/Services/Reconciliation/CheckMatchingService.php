@@ -122,9 +122,13 @@ class CheckMatchingService
             ->filter()
             ->all();
 
+        // Only what THIS statement cleared is reset and matched again. A check cleared in an earlier
+        // period (by that period's own statement) stays cleared, otherwise running the next month's
+        // matching would turn last month's cleared checks back into outstanding ones.
         $checks
             ->whereNotIn('id', $manuallyMatchedCheckIds)
             ->where('status', CheckStatus::Cleared->value)
+            ->whereIn('cleared_bank_transaction_id', $clearings->pluck('id')->all())
             ->each(fn (CheckIssuance $c) => $c->update([
                 'status' => CheckStatus::Outstanding,
                 'cleared_on' => null,

@@ -46,6 +46,44 @@ class ImportBatch extends Model
         ];
     }
 
+    /**
+     * What the file adds up to, from the rows it was read into: for a Report of Checks
+     * Issued the number of checks and their total; for a bank statement the number of
+     * transactions, the total debits and credits, the opening and ending balances, and
+     * whether opening - debits + credits really gives the ending balance.
+     *
+     * @return array<string, mixed>
+     */
+    public function totals(): array
+    {
+        $rows = collect($this->parsed_preview ?? []);
+
+        if ($this->type === ImportType::Rci) {
+            return [
+                'count' => $rows->count(),
+                'total_amount' => round((float) $rows->sum('amount'), 2),
+            ];
+        }
+
+        $transactions = $rows->reject(fn (array $row) => $row['is_balance_forward'] ?? false);
+        $opening = $rows->first(fn (array $row) => $row['is_balance_forward'] ?? false)['running_balance'] ?? null;
+        $ending = $transactions->pluck('running_balance')->filter(fn ($v) => $v !== null)->last() ?? $opening;
+        $debits = round((float) $transactions->sum('debit'), 2);
+        $credits = round((float) $transactions->sum('credit'), 2);
+
+        return [
+            'count' => $transactions->count(),
+            'total_debit' => $debits,
+            'total_credit' => $credits,
+            'opening_balance' => $opening !== null ? (float) $opening : null,
+            'ending_balance' => $ending !== null ? (float) $ending : null,
+            // Null when the statement has no balances to check against.
+            'adds_up' => $opening !== null && $ending !== null
+                ? abs(round((float) $opening - $debits + $credits, 2) - round((float) $ending, 2)) < 0.01
+                : null,
+        ];
+    }
+
     /** @return BelongsTo<Reconciliation, $this> */
     public function reconciliation(): BelongsTo
     {

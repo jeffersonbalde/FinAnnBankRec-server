@@ -1,8 +1,10 @@
 <?php
 
+use App\Enums\ImportType;
 use App\Enums\ReconciliationStatus;
 use App\Enums\UserRole;
 use App\Models\BankAccount;
+use App\Models\ImportBatch;
 use App\Models\Reconciliation;
 use Illuminate\Http\UploadedFile;
 use Illuminate\Support\Facades\Storage;
@@ -193,4 +195,54 @@ it('forbids the budget officer from creating or importing into reconciliations',
         'type' => 'rci',
         'file' => fixtureUpload('rci.xlsx'),
     ])->assertForbidden();
+});
+
+it('tells what a Report of Checks Issued adds up to, before and after it is committed', function () {
+    actingAsRole(UserRole::FinancialAnalyst);
+    $reconciliation = draftReconciliation();
+
+    $preview = $this->postJson("/api/v1/reconciliations/{$reconciliation->id}/imports", [
+        'type' => 'rci',
+        'file' => fixtureUpload('rci.xlsx'),
+    ])->assertCreated();
+
+    // The fixture's two checks: 10,000.00 and 550,000.00 less 2% withholding (539,000.00).
+    $preview->assertJsonPath('data.totals.count', 2)
+        ->assertJsonPath('data.totals.total_amount', 549000);
+
+    $this->postJson('/api/v1/imports/'.$preview->json('data.id').'/commit')
+        ->assertOk()
+        ->assertJsonPath('data.totals.count', 2)
+        ->assertJsonPath('data.totals.total_amount', 549000);
+});
+
+it('tells what a bank statement adds up to and whether its balances agree', function () {
+    actingAsRole(UserRole::FinancialAnalyst);
+    $reconciliation = draftReconciliation();
+
+    $this->postJson("/api/v1/reconciliations/{$reconciliation->id}/imports", [
+        'type' => 'bank_statement',
+        'file' => fixtureUpload('bank_statement.csv'),
+    ])->assertCreated()
+        ->assertJsonPath('data.totals.count', 1)
+        ->assertJsonPath('data.totals.total_debit', 539000)
+        ->assertJsonPath('data.totals.total_credit', 0)
+        ->assertJsonPath('data.totals.opening_balance', 1010000)
+        ->assertJsonPath('data.totals.ending_balance', 471000)
+        ->assertJsonPath('data.totals.adds_up', true);
+});
+
+it('warns when a bank statement does not add up', function () {
+    $batch = new ImportBatch([
+        'type' => ImportType::BankStatement,
+        'parsed_preview' => [
+            ['is_balance_forward' => true, 'running_balance' => 1000.0, 'debit' => 0.0, 'credit' => 0.0],
+            ['is_balance_forward' => false, 'debit' => 100.0, 'credit' => 0.0, 'running_balance' => 950.0],
+        ],
+    ]);
+
+    expect($batch->totals()['adds_up'])->toBeFalse();
+
+    $batch->parsed_preview = [['is_balance_forward' => false, 'debit' => 100.0, 'credit' => 0.0, 'running_balance' => null]];
+    expect($batch->totals()['adds_up'])->toBeNull();
 });

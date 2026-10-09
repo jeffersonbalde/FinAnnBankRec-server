@@ -31,6 +31,7 @@ class ImportBatchResource extends JsonResource
             'preview' => $this->when($request->boolean('with_preview'), fn () => $this->parsed_preview),
             'errors' => $this->error_log ?? [],
             'meta' => $this->meta ?? [],
+            'totals' => $this->totals(),
             'uploaded_by' => $this->whenLoaded('uploadedBy', fn () => $this->uploadedBy?->name),
             'committed_at' => $this->committed_at,
             'created_at' => $this->created_at,

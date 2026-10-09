@@ -147,6 +147,7 @@ class Reconciliation extends Model
 
     public function latestMatchRun(): ?MatchRun
     {
-        return $this->matchRuns()->latest()->first();
+        // created_at only has second precision: break ties by id so the newest run always wins.
+        return $this->matchRuns()->latest()->latest('id')->first();
     }
 }
