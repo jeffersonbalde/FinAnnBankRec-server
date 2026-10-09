@@ -105,16 +105,7 @@ class MatchController extends Controller
      */
     private function boardPayload(Reconciliation $reconciliation): array
     {
-        $checks = $reconciliation->bankAccount->checkIssuances()
-            ->with('reconciliation')
-            ->where('status', '!=', CheckStatus::Cancelled->value)
-            // Only what matters to this period: checks issued by its end (a later month's are not yet
-            // outstanding), leaving out those the bank already cleared before it began.
-            ->where(fn ($q) => $q->whereNull('check_date')->orWhere('check_date', '<=', $reconciliation->period_end))
-            ->where(fn ($q) => $q->whereNull('cleared_on')->orWhere('cleared_on', '>=', $reconciliation->period_start))
-            ->orderBy('check_date')
-            ->orderBy('serial_no')
-            ->get();
+        $checks = $reconciliation->matchingChecks()->with('reconciliation')->get();
 
         $clearings = $reconciliation->bankTransactions()
             ->where('is_balance_forward', false)

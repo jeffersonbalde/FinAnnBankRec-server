@@ -9,6 +9,7 @@ use App\Services\Imports\ImportManager;
 use App\Services\Reconciliation\ReconciliationEngine;
 use Illuminate\Http\UploadedFile;
 use Illuminate\Support\Facades\Storage;
+use PhpOffice\PhpSpreadsheet\IOFactory;
 
 function reconciledJuly(): Reconciliation
 {
@@ -88,6 +89,38 @@ it('exports the Report of Checks Issued as a valid xlsx', function () {
     $response->assertOk()
         ->assertHeader('content-type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
     expect(substr($response->streamedContent(), 0, 2))->toBe('PK');
+});
+
+it('exports each list of the Matching tab with the same records the screen shows', function () {
+    actingAsRole(UserRole::FinancialAnalyst);
+    $reconciliation = reconciledJuly();
+
+    // The tab's own counts, straight from the board the screen reads.
+    $board = $this->getJson("/api/v1/reconciliations/{$reconciliation->id}/matches")->assertOk();
+    $checks = collect($board->json('checks'));
+    $expected = [
+        'cleared' => $checks->where('status', 'cleared')->count(),
+        'outstanding' => $checks->whereIn('status', ['outstanding', 'stale'])->count(),
+        'flags' => count($board->json('flags')),
+    ];
+
+    foreach ($expected as $category => $count) {
+        $response = $this->get("/api/v1/reconciliations/{$reconciliation->id}/export/matching.xlsx?category={$category}");
+
+        $response->assertOk()->assertHeader('content-type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+        $path = tempnam(sys_get_temp_dir(), 'match').'.xlsx';
+        file_put_contents($path, $response->streamedContent());
+        $sheet = IOFactory::load($path)->getActiveSheet();
+        unlink($path);
+
+        // Records start on row 8; "TOTAL" closes the check lists, flags have none.
+        $listed = collect(range(8, $sheet->getHighestRow()))->filter(fn ($r) => is_numeric($sheet->getCell("A{$r}")->getValue()))->count();
+        expect($listed)->toBe($count, "{$category} rows in the Excel file");
+    }
+
+    $this->getJson("/api/v1/reconciliations/{$reconciliation->id}/export/matching.xlsx")->assertStatus(422);
+    $this->getJson("/api/v1/reconciliations/{$reconciliation->id}/export/matching.xlsx?category=nope")->assertStatus(422);
+    $this->assertDatabaseHas('audit_logs', ['action' => 'exported', 'description' => 'Downloaded the Cleared Checks list (Excel) of reconciliation #'.$reconciliation->id]);
 });
 
 it('rejects an export for a guest', function () {

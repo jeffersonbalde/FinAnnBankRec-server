@@ -4,6 +4,7 @@ namespace App\Http\Controllers\Api\V1;
 
 use App\Enums\CheckStatus;
 use App\Exports\BrsExport;
+use App\Exports\MatchingListExport;
 use App\Exports\OutstandingChecksListExport;
 use App\Exports\OutstandingChecksScheduleExport;
 use App\Exports\RciExport;
@@ -16,6 +17,7 @@ use App\Services\Reconciliation\BrsCalculator;
 use Barryvdh\DomPDF\Facade\Pdf;
 use Carbon\CarbonImmutable;
 use Illuminate\Http\Request;
+use Illuminate\Validation\Rule;
 use PhpOffice\PhpSpreadsheet\Spreadsheet;
 use PhpOffice\PhpSpreadsheet\Writer\Xlsx as XlsxWriter;
 use Symfony\Component\HttpFoundation\StreamedResponse;
@@ -27,6 +29,7 @@ class ExportController extends Controller
         private readonly OutstandingChecksScheduleExport $scheduleExport,
         private readonly RciExport $rciExport,
         private readonly OutstandingChecksListExport $outstandingList,
+        private readonly MatchingListExport $matchingList,
         private readonly BrsCalculator $calculator,
     ) {}
 
@@ -127,6 +130,23 @@ class ExportController extends Controller
         return $this->stream(
             $this->outstandingList->build($checks, $scope, CarbonImmutable::now()),
             'Outstanding-Checks_'.now()->format('Y-m-d').'.xlsx',
+        );
+    }
+
+    /**
+     * One list of the Matching tab as Excel: the cleared checks, the outstanding ones,
+     * or the items that need attention.
+     */
+    public function matchingXlsx(Request $request, Reconciliation $reconciliation): StreamedResponse
+    {
+        $data = $request->validate(['category' => ['required', Rule::in(MatchingListExport::CATEGORIES)]]);
+
+        $label = ['cleared' => 'Cleared Checks', 'outstanding' => 'Outstanding Checks', 'flags' => 'Needs Attention'][$data['category']];
+        $this->logExport($request, "the {$label} list (Excel)", $reconciliation);
+
+        return $this->stream(
+            $this->matchingList->build($reconciliation, $data['category']),
+            $this->filename($reconciliation, str_replace(' ', '-', $label)).'.xlsx',
         );
     }
 

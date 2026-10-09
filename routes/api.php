@@ -77,6 +77,7 @@ Route::prefix('v1')->group(function (): void {
             Route::get('reconciliations/{reconciliation}/export/schedule-1.xlsx', [ExportController::class, 'scheduleXlsx']);
             Route::get('reconciliations/{reconciliation}/export/brs.pdf', [ExportController::class, 'brsPdf']);
             Route::get('reconciliations/{reconciliation}/export/rci.xlsx', [ExportController::class, 'rciXlsx']);
+            Route::get('reconciliations/{reconciliation}/export/matching.xlsx', [ExportController::class, 'matchingXlsx']);
         });
 
         /*

@@ -2,6 +2,7 @@
 
 namespace App\Models;
 
+use App\Enums\CheckStatus;
 use App\Enums\ReconciliationStatus;
 use App\Models\Concerns\RecordsAudit;
 use App\Services\Reconciliation\CheckRegisterService;
@@ -125,6 +126,23 @@ class Reconciliation extends Model
             ReconciliationStatus::Certified => "It belongs to the {$period} reconciliation, which is Certified and locked.",
             default => "It belongs to the {$period} reconciliation, which is {$this->status->label()}. It has to be returned for revision before this check can change.",
         };
+    }
+
+    /**
+     * The checks that matter to this period (what the Matching tab lists): issued by its end,
+     * not cancelled, and not already cleared before it began. A later month's checks are not
+     * yet outstanding, and a check the bank cleared earlier belongs to an earlier period.
+     *
+     * @return HasMany<CheckIssuance, BankAccount>
+     */
+    public function matchingChecks(): HasMany
+    {
+        return $this->bankAccount->checkIssuances()
+            ->where('status', '!=', CheckStatus::Cancelled->value)
+            ->where(fn ($q) => $q->whereNull('check_date')->orWhere('check_date', '<=', $this->period_end))
+            ->where(fn ($q) => $q->whereNull('cleared_on')->orWhere('cleared_on', '>=', $this->period_start))
+            ->orderBy('check_date')
+            ->orderBy('serial_no');
     }
 
     public function latestMatchRun(): ?MatchRun
