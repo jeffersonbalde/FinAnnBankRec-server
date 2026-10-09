@@ -89,3 +89,23 @@ it('answers a photo download with a clear message when the file is missing from 
         ->assertNotFound()
         ->assertJsonPath('message', 'The photo file is no longer on the server. Please upload the photo again.');
 });
+
+it('resets every demo photo to the original with --force, even for someone with an uploaded photo or none', function () {
+    Storage::fake('public');
+    Http::fake(['randomuser.me/*' => Http::response(str_repeat('x', 2000), 200)]);
+
+    User::factory()->create(['email' => 'analyst@tesda.gov.ph', 'avatar_path' => 'avatars/mine.jpg']);
+    Storage::disk('public')->put('avatars/mine.jpg', 'their own photo');
+    $none = User::factory()->create(['email' => 'admin@tesda.gov.ph', 'avatar_path' => null]);
+
+    // Without --force a photo that is there is left alone.
+    $this->artisan('finann:restore-demo-avatars')->assertSuccessful();
+    expect(Storage::disk('public')->get('avatars/mine.jpg'))->toBe('their own photo')
+        ->and($none->fresh()->avatar_path)->toBeNull();
+
+    $this->artisan('finann:restore-demo-avatars', ['--force' => true])->assertSuccessful();
+
+    expect(Storage::disk('public')->get('avatars/mine.jpg'))->toBe(str_repeat('x', 2000))
+        ->and($none->fresh()->avatar_path)->toStartWith('avatars/system-administrator-')
+        ->and(Storage::disk('public')->exists($none->fresh()->avatar_path))->toBeTrue();
+});
