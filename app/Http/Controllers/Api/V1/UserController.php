@@ -128,7 +128,8 @@ class UserController extends Controller
     /** A person's profile photo as a file download (any signed-in user may view photos). */
     public function downloadAvatar(User $user): StreamedResponse
     {
-        abort_unless($user->avatar_path && Storage::disk('public')->exists($user->avatar_path), 404, 'This user has no photo.');
+        abort_unless($user->avatar_path, 404, 'This user has no photo.');
+        abort_unless(Storage::disk('public')->exists($user->avatar_path), 404, 'The photo file is no longer on the server. Please upload the photo again.');
 
         $extension = pathinfo($user->avatar_path, PATHINFO_EXTENSION) ?: 'jpg';
 
