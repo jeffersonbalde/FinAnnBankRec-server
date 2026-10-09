@@ -70,6 +70,7 @@ class CheckMatchingService
                         'message' => "Check {$clearing->check_no}: books show ".number_format((float) $near->amount, 2).' but the bank cleared '.number_format((float) $clearing->debit, 2).'.',
                         'check_issuance_id' => $near->id,
                         'bank_transaction_id' => $clearing->id,
+                        'check_no' => $clearing->check_no,
                         'book_amount' => (float) $near->amount,
                         'bank_amount' => (float) $clearing->debit,
                         'difference' => round((float) $clearing->debit - (float) $near->amount, 2),

@@ -90,7 +90,8 @@ it('flags a check the bank cleared for a different amount', function () {
 
     expect($result['match']['matched'])->toBe(0)
         ->and($result['match']['flags'])->toHaveCount(1)
-        ->and($result['match']['flags'][0]['type'])->toBe('amount_mismatch');
+        ->and($result['match']['flags'][0]['type'])->toBe('amount_mismatch')
+        ->and($result['match']['flags'][0]['check_no'])->not->toBeEmpty();
 
     $this->assertDatabaseHas('check_issuances', ['serial_no' => '000100002', 'status' => 'outstanding']);
 });
