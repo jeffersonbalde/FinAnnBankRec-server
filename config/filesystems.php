@@ -38,7 +38,26 @@ return [
             'report' => false,
         ],
 
-        'public' => [
+        // Profile photos. On this computer they live in storage/app/public. On a host whose
+        // disk is wiped on every deploy (e.g. DigitalOcean App Platform) set SPACES_BUCKET
+        // (+ the other SPACES_* values, see .env.production.example) and they are kept in a
+        // DigitalOcean Spaces bucket instead; nothing else in the app changes.
+        'public' => env('SPACES_BUCKET') ? [
+            'driver' => 's3',
+            'key' => env('SPACES_KEY'),
+            'secret' => env('SPACES_SECRET'),
+            'region' => env('SPACES_REGION', 'sgp1'),
+            'bucket' => env('SPACES_BUCKET'),
+            'endpoint' => env('SPACES_ENDPOINT', 'https://sgp1.digitaloceanspaces.com'),
+            // Public address of the bucket (or its CDN), without the folder below.
+            'url' => rtrim((string) env('SPACES_URL', ''), '/') ?: null,
+            // Everything of this app goes under one folder, so the bucket can be shared safely.
+            'root' => trim((string) env('SPACES_ROOT', 'finann'), '/'),
+            'visibility' => 'public',
+            'use_path_style_endpoint' => false,
+            'throw' => false,
+            'report' => false,
+        ] : [
             'driver' => 'local',
             'root' => storage_path('app/public'),
             'url' => rtrim(env('APP_URL', 'http://localhost'), '/').'/storage',

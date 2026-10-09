@@ -23,8 +23,35 @@ class DemoSeeder extends Seeder
     {
         Storage::disk('public')->makeDirectory('avatars');
 
-        // gender + portrait index map to stable professional headshots
-        $accounts = [
+        $accounts = self::accounts();
+
+        foreach ($accounts as $account) {
+            [$folder, $index] = $account['portrait'];
+            $path = $this->downloadPortrait($account['name'], $folder, $index);
+
+            User::query()->updateOrCreate(
+                ['email' => $account['email']],
+                [
+                    'name' => $account['name'],
+                    'password' => Hash::make('password'),
+                    'role' => $account['role'],
+                    'designation' => $account['designation'],
+                    'avatar_path' => $path,
+                    'is_active' => true,
+                ],
+            );
+        }
+    }
+
+    /**
+     * The demo accounts. "portrait" is a gender + index that maps to a stable
+     * professional headshot on randomuser.me.
+     *
+     * @return list<array{name: string, email: string, role: UserRole, designation: string, portrait: array{0: string, 1: int}}>
+     */
+    public static function accounts(): array
+    {
+        return [
             [
                 'name' => 'System Administrator',
                 'email' => 'admin@tesda.gov.ph',
@@ -110,23 +137,6 @@ class DemoSeeder extends Seeder
                 'portrait' => ['men', 41],
             ],
         ];
-
-        foreach ($accounts as $account) {
-            [$folder, $index] = $account['portrait'];
-            $path = $this->downloadPortrait($account['name'], $folder, $index);
-
-            User::query()->updateOrCreate(
-                ['email' => $account['email']],
-                [
-                    'name' => $account['name'],
-                    'password' => Hash::make('password'),
-                    'role' => $account['role'],
-                    'designation' => $account['designation'],
-                    'avatar_path' => $path,
-                    'is_active' => true,
-                ],
-            );
-        }
     }
 
     /**
