@@ -84,6 +84,39 @@ class ImportBatch extends Model
         ];
     }
 
+    /**
+     * A warning when the file names a bank account other than the one this reconciliation is
+     * for (the Report of Checks Issued says "LBP 1292-0001-01", a statement has its account
+     * number) — the commonest slip, and the matching only ever compares one account's checks
+     * with that account's statement. Null when they agree or the file does not say.
+     */
+    public function accountWarning(): ?string
+    {
+        $account = $this->reconciliation?->bankAccount;
+        $said = $this->type === ImportType::Rci
+            ? ($this->meta['bank_account_hint'] ?? null)
+            : ($this->meta['account_number'] ?? null);
+
+        if ($account === null || $said === null) {
+            return null;
+        }
+
+        // The longest run of digits and dashes in the text, as plain digits without leading zeros.
+        preg_match_all('/\d[\d\-]*\d|\d/', (string) $said, $found);
+        $fileNumber = collect($found[0])->sortByDesc(fn (string $n) => strlen($n))->first();
+        $normalise = fn (?string $n) => ltrim(preg_replace('/\D/', '', (string) $n) ?? '', '0');
+        $theirs = $normalise($fileNumber);
+        $ours = $normalise($account->account_number);
+
+        if ($theirs === '' || $ours === '' || $theirs === $ours || str_ends_with($ours, $theirs) || str_ends_with($theirs, $ours)) {
+            return null;
+        }
+
+        $label = trim(($account->bank_short_name ?: $account->bank_name).' '.$account->account_number);
+
+        return "This file is for account {$fileNumber}, but this reconciliation is for {$label}. Check that you chose the right bank account — checks and statements are only matched within the same account.";
+    }
+
     /** @return BelongsTo<Reconciliation, $this> */
     public function reconciliation(): BelongsTo
     {

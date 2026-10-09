@@ -246,3 +246,40 @@ it('warns when a bank statement does not add up', function () {
     $batch->parsed_preview = [['is_balance_forward' => false, 'debit' => 100.0, 'credit' => 0.0, 'running_balance' => null]];
     expect($batch->totals()['adds_up'])->toBeNull();
 });
+
+it('warns when a file is for another bank account than the reconciliation', function () {
+    actingAsRole(UserRole::FinancialAnalyst);
+    $reconciliation = Reconciliation::factory()->for(BankAccount::factory()->create([
+        'bank_short_name' => 'LBP',
+        'account_number' => '001292-1044-95',
+    ]))->create([
+        'status' => ReconciliationStatus::Draft,
+        'period_start' => '2026-07-01',
+        'period_end' => '2026-07-31',
+    ]);
+
+    // The fixture files are for LBP 1292-0001-01.
+    foreach (['rci' => 'rci.xlsx', 'bank_statement' => 'bank_statement.csv'] as $type => $file) {
+        $this->postJson("/api/v1/reconciliations/{$reconciliation->id}/imports", ['type' => $type, 'file' => fixtureUpload($file)])
+            ->assertCreated()
+            ->assertJsonPath('data.account_warning', fn ($warning) => str_contains($warning, '1292-0001-01') && str_contains($warning, '001292-1044-95'));
+    }
+});
+
+it('does not warn when the file is for the same bank account, however its number is written', function () {
+    actingAsRole(UserRole::FinancialAnalyst);
+
+    foreach (['1292-0001-01', '0001292-0001-01', '001292000101'] as $written) {
+        $reconciliation = Reconciliation::factory()->for(BankAccount::factory()->create(['account_number' => $written]))->create([
+            'status' => ReconciliationStatus::Draft,
+            'period_start' => '2026-07-01',
+            'period_end' => '2026-07-31',
+        ]);
+
+        foreach (['rci' => 'rci.xlsx', 'bank_statement' => 'bank_statement.csv'] as $type => $file) {
+            $this->postJson("/api/v1/reconciliations/{$reconciliation->id}/imports", ['type' => $type, 'file' => fixtureUpload($file)])
+                ->assertCreated()
+                ->assertJsonPath('data.account_warning', null);
+        }
+    }
+});
